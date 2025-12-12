@@ -50,7 +50,17 @@ class AudioConverterService(
                 .redirectErrorStream(true)
                 .start()
 
+            // Read output in a separate thread to avoid deadlock
+            val outputBuilder = StringBuilder()
+            val outputReader = Thread {
+                process.inputStream.bufferedReader().forEachLine { line ->
+                    outputBuilder.appendLine(line)
+                }
+            }
+            outputReader.start()
+
             val completed = process.waitFor(120, TimeUnit.SECONDS)
+            outputReader.join(5000) // Wait max 5s for output
             
             if (!completed) {
                 process.destroyForcibly()
@@ -58,12 +68,13 @@ class AudioConverterService(
                 return null
             }
 
-            if (process.exitValue() == 0 && outputFile.exists()) {
-                logger.info("Successfully converted ${inputFile.name}")
+            val output = outputBuilder.toString()
+            
+            if (process.exitValue() == 0 && outputFile.exists() && outputFile.length() > 0) {
+                logger.info("Successfully converted ${inputFile.name} (${outputFile.length()} bytes)")
                 outputFile.toPath()
             } else {
-                val output = process.inputStream.bufferedReader().readText()
-                logger.error("FFmpeg conversion failed for ${inputFile.name}: $output")
+                logger.error("FFmpeg conversion failed for ${inputFile.name} (exit: ${process.exitValue()}): $output")
                 null
             }
         } catch (e: Exception) {

@@ -1,6 +1,10 @@
 package com.ingstech.meeting.api.service
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
+import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
@@ -23,15 +27,17 @@ data class AssemblyAIRoomState(
     @Volatile var summary: Map<String, Any?>? = null
 )
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 data class AssemblyAIUploadResponse(
-    val upload_url: String
+    @JsonProperty("upload_url") val uploadUrl: String = ""
 )
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 data class AssemblyAITranscriptResponse(
-    val id: String,
-    val status: String,
-    val text: String? = null,
-    val error: String? = null
+    @JsonProperty("id") val id: String = "",
+    @JsonProperty("status") val status: String = "",
+    @JsonProperty("text") val text: String? = null,
+    @JsonProperty("error") val error: String? = null
 )
 
 @Service
@@ -50,8 +56,8 @@ class AssemblyAITranscriptionService(
         .connectTimeout(java.time.Duration.ofSeconds(30))
         .build()
     
-    private val objectMapper = ObjectMapper().apply {
-        configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+    private val objectMapper = jacksonObjectMapper().apply {
+        configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
     }
     
     private val roomStates = ConcurrentHashMap<String, AssemblyAIRoomState>()
@@ -107,14 +113,19 @@ class AssemblyAITranscriptionService(
         val chunkFile = File(roomDir, "chunk_$chunkIndex.webm")
         chunkFile.writeBytes(audioData)
         
+        logger.info("Processing chunk $chunkIndex: ${audioData.size} bytes saved to ${chunkFile.absolutePath}")
+        
         try {
             // Convert to WAV
             val convertedPath = audioConverterService.convertToPcm16(chunkFile.toPath())
             
             if (convertedPath == null) {
-                logger.warn("Failed to convert chunk $chunkIndex")
+                logger.error("Failed to convert chunk $chunkIndex - FFmpeg conversion returned null")
+                chunkFile.delete()
                 return
             }
+            
+            logger.info("Chunk $chunkIndex converted successfully to: ${convertedPath.toAbsolutePath()}")
             
             // Transcribe with AssemblyAI
             val transcription = transcribeFile(convertedPath)
@@ -180,6 +191,8 @@ class AssemblyAITranscriptionService(
             return null
         }
         
+        logger.info("Uploading file to AssemblyAI: ${audioPath.toAbsolutePath()} (${file.length()} bytes)")
+        
         val request = HttpRequest.newBuilder()
             .uri(URI.create("https://api.assemblyai.com/v2/upload"))
             .header("Authorization", apiKey)
@@ -189,16 +202,21 @@ class AssemblyAITranscriptionService(
         
         val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
         
+        logger.info("Upload response: ${response.statusCode()} - ${response.body().take(200)}")
+        
         if (response.statusCode() != 200) {
             logger.error("Upload failed: ${response.statusCode()} - ${response.body()}")
             return null
         }
         
         val uploadResponse = objectMapper.readValue<AssemblyAIUploadResponse>(response.body())
-        return uploadResponse.upload_url
+        logger.info("Upload URL received: ${uploadResponse.uploadUrl.take(50)}...")
+        return uploadResponse.uploadUrl
     }
 
     private fun createTranscription(audioUrl: String): String? {
+        logger.info("Creating transcription for audio: ${audioUrl.take(50)}...")
+        
         val requestBody = objectMapper.writeValueAsString(
             mapOf(
                 "audio_url" to audioUrl,
@@ -218,18 +236,23 @@ class AssemblyAITranscriptionService(
         
         val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
         
+        logger.info("Transcription create response: ${response.statusCode()}")
+        
         if (response.statusCode() != 200) {
             logger.error("Create transcription failed: ${response.statusCode()} - ${response.body()}")
             return null
         }
         
         val transcriptResponse = objectMapper.readValue<AssemblyAITranscriptResponse>(response.body())
+        logger.info("Transcript ID: ${transcriptResponse.id}, status: ${transcriptResponse.status}")
         return transcriptResponse.id
     }
 
     private fun pollTranscription(transcriptId: String): String? {
-        val maxAttempts = 120 // 60 seconds max
+        val maxAttempts = 60 // 30 seconds max (chunks are short)
         val pollInterval = 500L
+        
+        logger.info("Polling transcription $transcriptId...")
         
         repeat(maxAttempts) { attempt ->
             val request = HttpRequest.newBuilder()
