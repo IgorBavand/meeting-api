@@ -1,0 +1,16 @@
+# ==============================================================================
+# Railway Configuration
+# ==============================================================================
+# This file configures the Railway deployment settings
+# ==============================================================================
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "java $JAVA_OPTS -jar app.jar"
+healthcheckPath = "/actuator/health"
+healthcheckTimeout = 300
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3

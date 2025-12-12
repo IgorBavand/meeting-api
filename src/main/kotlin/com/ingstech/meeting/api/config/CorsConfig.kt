@@ -13,13 +13,14 @@ class CorsConfig {
     fun corsFilter(): CorsFilter {
         val config = CorsConfiguration()
         config.allowCredentials = false
-        config.addAllowedOrigin("http://localhost:4200")
-        config.addAllowedOrigin("https://localhost:4200")
-        config.addAllowedOrigin("https://localhost.localdomain:4200")
-        config.addAllowedOrigin("https://lvh.me:4200")
-        config.addAllowedOrigin("https://vite.lvh.me:4200")
-        config.addAllowedOrigin("https://192.168.0.3:4200")
-        config.addAllowedOrigin("https://172.17.0.1:4200")
+        config.addAllowedOriginPattern("http://localhost:*")
+        config.addAllowedOriginPattern("https://localhost:*")
+        config.addAllowedOriginPattern("http://172.20.10.*:*")
+        config.addAllowedOriginPattern("https://172.20.10.*:*")
+        config.addAllowedOriginPattern("http://192.168.*.*:*")
+        config.addAllowedOriginPattern("https://192.168.*.*:*")
+        config.addAllowedOriginPattern("https://lvh.me:*")
+        config.addAllowedOriginPattern("https://vite.lvh.me:*")
         config.addAllowedOrigin("https://meeting-portal.vercel.app")
         config.addAllowedHeader("*")
         config.addAllowedMethod("GET")
@@ -31,6 +32,7 @@ class CorsConfig {
         val source = UrlBasedCorsConfigurationSource()
         source.registerCorsConfiguration("/api/**", config)
         source.registerCorsConfiguration("/ws/**", config)
+        source.registerCorsConfiguration("/webhooks/**", config)
 
         return CorsFilter(source)
     }

@@ -1,0 +1,51 @@
+# Docker
+Dockerfile
+docker-compose*.yml
+.docker/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# Build
+target/
+build/
+*.class
+*.jar
+*.war
+
+# Maven
+.mvn/wrapper/maven-wrapper.jar
+
+# Node (frontend)
+meeting-portal/node_modules/
+meeting-portal/dist/
+meeting-portal/.angular/
+
+# Logs
+*.log
+logs/
+
+# Temp files
+*.tmp
+*.temp
+.DS_Store
+
+# Environment files (secrets)
+.env
+.env.local
+.env.*.local
+*.env
+
+# Local config
+application-local.properties
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# OS files
+Thumbs.db
