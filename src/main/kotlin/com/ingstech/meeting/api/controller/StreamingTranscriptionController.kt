@@ -1,6 +1,6 @@
 package com.ingstech.meeting.api.controller
 
-import com.ingstech.meeting.api.service.OptimizedStreamingTranscriptionService
+import com.ingstech.meeting.api.service.AssemblyAITranscriptionService
 import com.ingstech.meeting.api.service.GeminiSummaryService
 import org.slf4j.LoggerFactory
 import org.springframework.http.ResponseEntity
@@ -10,7 +10,7 @@ import org.springframework.web.multipart.MultipartFile
 @RestController
 @RequestMapping("/api/v1/transcription")
 class StreamingTranscriptionController(
-    private val streamingService: OptimizedStreamingTranscriptionService,
+    private val assemblyAIService: AssemblyAITranscriptionService,
     private val geminiService: GeminiSummaryService
 ) {
     private val logger = LoggerFactory.getLogger(StreamingTranscriptionController::class.java)
@@ -30,7 +30,7 @@ class StreamingTranscriptionController(
         logger.info("Received chunk $chunkIndex for room $roomSid (${audioFile.size} bytes)")
 
         // Queue chunk for async processing - returns immediately
-        val queued = streamingService.queueChunk(
+        val queued = assemblyAIService.queueChunk(
             roomSid = roomSid,
             chunkIndex = chunkIndex,
             audioData = audioFile.bytes,
@@ -41,7 +41,7 @@ class StreamingTranscriptionController(
             "success" to queued,
             "chunkIndex" to chunkIndex,
             "queued" to queued,
-            "status" to streamingService.getStatus(roomSid)
+            "status" to assemblyAIService.getStatus(roomSid)
         ))
     }
 
@@ -55,7 +55,7 @@ class StreamingTranscriptionController(
         
         logger.info("Finalizing transcription for room ${request.roomSid}")
 
-        val fullTranscription = streamingService.finalizeTranscription(request.roomSid)
+        val fullTranscription = assemblyAIService.finalizeTranscription(request.roomSid)
         
         return ResponseEntity.ok(mapOf(
             "success" to true,
@@ -70,8 +70,8 @@ class StreamingTranscriptionController(
      */
     @GetMapping("/partial/{roomSid}")
     fun getPartialTranscription(@PathVariable roomSid: String): ResponseEntity<Map<String, Any>> {
-        val transcription = streamingService.getTranscription(roomSid)
-        val status = streamingService.getStatus(roomSid)
+        val transcription = assemblyAIService.getTranscription(roomSid)
+        val status = assemblyAIService.getStatus(roomSid)
         
         return ResponseEntity.ok(mapOf(
             "roomSid" to roomSid,
@@ -85,7 +85,7 @@ class StreamingTranscriptionController(
      */
     @GetMapping("/status/{roomSid}")
     fun getStatus(@PathVariable roomSid: String): ResponseEntity<Map<String, Any>> {
-        return ResponseEntity.ok(streamingService.getStatus(roomSid))
+        return ResponseEntity.ok(assemblyAIService.getStatus(roomSid))
     }
 
     /**
@@ -98,7 +98,7 @@ class StreamingTranscriptionController(
         
         logger.info("Finalizing transcription with summary for room ${request.roomSid}")
 
-        val fullTranscription = streamingService.finalizeTranscription(request.roomSid)
+        val fullTranscription = assemblyAIService.finalizeTranscription(request.roomSid)
         
         // Generate summary with Gemini
         val summary = geminiService.generateSummary(
@@ -120,7 +120,7 @@ class StreamingTranscriptionController(
      */
     @DeleteMapping("/{roomSid}")
     fun clearRoom(@PathVariable roomSid: String): ResponseEntity<Map<String, Any>> {
-        streamingService.clearRoom(roomSid)
+        assemblyAIService.clearRoom(roomSid)
         return ResponseEntity.ok(mapOf(
             "success" to true,
             "message" to "Room $roomSid cleared"
