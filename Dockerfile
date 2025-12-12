@@ -63,9 +63,14 @@ WORKDIR /app
 
 # Copy whisper-cli binary and all shared libraries from builder
 COPY --from=whisper-builder /build/whisper.cpp/build/bin/whisper-cli /usr/local/bin/whisper-cli
-COPY --from=whisper-builder /build/whisper.cpp/build/src/libwhisper.so* /usr/local/lib/
-COPY --from=whisper-builder /build/whisper.cpp/build/ggml/src/libggml*.so* /usr/local/lib/
-RUN chmod +x /usr/local/bin/whisper-cli && \
+
+# Copy all .so files from the build directory
+COPY --from=whisper-builder /build/whisper.cpp/build/ /tmp/whisper-build/
+
+# Find and copy all shared libraries
+RUN find /tmp/whisper-build -name "*.so*" -exec cp {} /usr/local/lib/ \; && \
+    rm -rf /tmp/whisper-build && \
+    chmod +x /usr/local/bin/whisper-cli && \
     ldconfig
 
 # Create directory for whisper models
