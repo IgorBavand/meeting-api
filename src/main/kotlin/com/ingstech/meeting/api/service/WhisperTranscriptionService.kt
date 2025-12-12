@@ -20,7 +20,7 @@ class WhisperTranscriptionService(
     @Value("\${whisper.docker.model.path:/models/ggml-base.bin}") private val dockerModelPath: String,
     @Value("\${whisper.http.url:http://localhost:9000}") private val httpUrl: String,
     @Value("\${whisper.path:/opt/homebrew/bin/whisper-cli}") private val whisperPath: String,
-    @Value("\${whisper.model:medium}") private val whisperModel: String,
+    @Value("\${whisper.model:small}") private val whisperModel: String,
     @Value("\${whisper.language:pt}") private val whisperLanguage: String,
     @Value("\${whisper.threads:4}") private val threads: Int,
     @Value("\${whisper.models.path:/tmp/whisper-models}") private val modelsPath: String,
@@ -28,6 +28,10 @@ class WhisperTranscriptionService(
 ) {
     private val logger = LoggerFactory.getLogger(WhisperTranscriptionService::class.java)
     private val httpClient = HttpClient.newBuilder().build()
+    
+    // Cache the model file to avoid repeated lookups
+    @Volatile
+    private var cachedModelFile: File? = null
 
     fun transcribe(audioPath: Path): String? {
         return transcribeWithContext(audioPath, "")
@@ -54,15 +58,15 @@ class WhisperTranscriptionService(
             return null
         }
 
-        // Try to find model with fallback
-        val modelFile = findModelFile()
+        // Try to find model with fallback (use cache)
+        val modelFile = getCachedModelFile()
         if (modelFile == null) {
             logger.error("No Whisper model found in $modelsPath")
             return null
         }
-        logger.info("Using model: ${modelFile.name}")
 
         return try {
+            // Optimized for SPEED - use smaller beam/best-of for faster processing
             val command = mutableListOf(
                 whisperPath,
                 "-m", modelFile.absolutePath,
@@ -71,15 +75,12 @@ class WhisperTranscriptionService(
                 "-l", whisperLanguage,
                 "-np",                // no prints (cleaner output)
                 "-nt",                // no timestamps
-                // Optimized parameters for accuracy
-                "-bs", "8",           // beam-size 8 for better accuracy
-                "-bo", "8",           // best-of 8
-                "-mc", "128",         // max-context 128 tokens for better continuity
-                "-wt", "0.01",        // word threshold for timestamps
-                "-et", "2.8",         // entropy threshold (higher = more strict)
-                "-lpt", "-0.5",       // log probability threshold
+                // SPEED optimized parameters
+                "-bs", "1",           // beam-size 1 for speed (was 8)
+                "-bo", "1",           // best-of 1 for speed (was 8)
+                "-mc", "64",          // reduced context for speed
                 "-sns",               // suppress non-speech tokens
-                "-nf"                 // no fallback (use greedy if beam fails)
+                "--flash-attn"        // enable flash attention for speed
             )
 
             // Add context prompt if available (helps maintain conversation continuity)
@@ -101,7 +102,7 @@ class WhisperTranscriptionService(
                 output.appendLine(line)
             }
 
-            val completed = process.waitFor(600, TimeUnit.SECONDS)  // 10 min timeout for medium model
+            val completed = process.waitFor(120, TimeUnit.SECONDS)  // 2 min timeout (reduced from 10)
 
             if (!completed) {
                 process.destroyForcibly()
@@ -271,11 +272,27 @@ class WhisperTranscriptionService(
     }
 
     /**
+     * Get cached model file or find it
+     */
+    private fun getCachedModelFile(): File? {
+        cachedModelFile?.let { 
+            if (it.exists()) return it 
+        }
+        
+        val found = findModelFile()
+        if (found != null) {
+            cachedModelFile = found
+            logger.info("Cached model file: ${found.name}")
+        }
+        return found
+    }
+
+    /**
      * Find the best available model file with fallback
      */
     private fun findModelFile(): File? {
-        // Priority order: configured model, then fallbacks
-        val modelPriority = listOf(whisperModel, "medium", "small", "base")
+        // Priority order: small first for speed, then others
+        val modelPriority = listOf(whisperModel, "small", "medium", "base")
         
         for (model in modelPriority) {
             val file = File("$modelsPath/ggml-$model.bin")

@@ -89,12 +89,12 @@ RUN mkdir -p /tmp/streaming /tmp/recordings
 COPY --from=java-builder /app/target/*.jar app.jar
 
 # Environment variables for Railway
-ENV JAVA_OPTS="-Xmx1024m -Xms512m"
+ENV JAVA_OPTS="-Xmx768m -Xms256m"
 ENV SERVER_PORT=8080
 ENV WHISPER_MODE=local
 ENV WHISPER_PATH=/usr/local/bin/whisper-cli
 ENV WHISPER_MODELS_PATH=/app/models
-ENV WHISPER_MODEL=medium
+ENV WHISPER_MODEL=small
 ENV WHISPER_LANGUAGE=pt
 ENV WHISPER_THREADS=4
 ENV FFMPEG_PATH=/usr/bin/ffmpeg

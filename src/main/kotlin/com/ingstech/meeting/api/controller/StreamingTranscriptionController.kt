@@ -1,6 +1,6 @@
 package com.ingstech.meeting.api.controller
 
-import com.ingstech.meeting.api.service.StreamingTranscriptionService
+import com.ingstech.meeting.api.service.OptimizedStreamingTranscriptionService
 import com.ingstech.meeting.api.service.GeminiSummaryService
 import org.slf4j.LoggerFactory
 import org.springframework.http.ResponseEntity
@@ -10,13 +10,14 @@ import org.springframework.web.multipart.MultipartFile
 @RestController
 @RequestMapping("/api/v1/transcription")
 class StreamingTranscriptionController(
-    private val streamingService: StreamingTranscriptionService,
+    private val streamingService: OptimizedStreamingTranscriptionService,
     private val geminiService: GeminiSummaryService
 ) {
     private val logger = LoggerFactory.getLogger(StreamingTranscriptionController::class.java)
 
     /**
-     * Receive and process a single audio chunk
+     * Receive and queue a single audio chunk for processing
+     * Returns immediately without waiting for transcription
      */
     @PostMapping("/chunk", consumes = ["multipart/form-data"])
     fun processChunk(
@@ -28,28 +29,20 @@ class StreamingTranscriptionController(
         
         logger.info("Received chunk $chunkIndex for room $roomSid (${audioFile.size} bytes)")
 
-        val result = streamingService.processChunk(
+        // Queue chunk for async processing - returns immediately
+        val queued = streamingService.queueChunk(
             roomSid = roomSid,
             chunkIndex = chunkIndex,
             audioData = audioFile.bytes,
             hasOverlap = hasOverlap
         )
 
-        return if (result != null) {
-            ResponseEntity.ok(mapOf(
-                "success" to true,
-                "chunkIndex" to result.chunkIndex,
-                "transcription" to result.transcription,
-                "totalChunks" to streamingService.getChunkCount(roomSid)
-            ))
-        } else {
-            ResponseEntity.ok(mapOf(
-                "success" to false,
-                "chunkIndex" to chunkIndex,
-                "transcription" to "",
-                "error" to "Failed to process chunk"
-            ))
-        }
+        return ResponseEntity.ok(mapOf(
+            "success" to queued,
+            "chunkIndex" to chunkIndex,
+            "queued" to queued,
+            "status" to streamingService.getStatus(roomSid)
+        ))
     }
 
     /**
@@ -68,24 +61,31 @@ class StreamingTranscriptionController(
             "success" to true,
             "roomSid" to request.roomSid,
             "fullTranscription" to fullTranscription,
-            "wordCount" to fullTranscription.split("\\s+".toRegex()).size
+            "wordCount" to fullTranscription.split("\\s+".toRegex()).filter { it.isNotBlank() }.size
         ))
     }
 
     /**
-     * Get current partial transcription
+     * Get current transcription (partial or complete)
      */
     @GetMapping("/partial/{roomSid}")
     fun getPartialTranscription(@PathVariable roomSid: String): ResponseEntity<Map<String, Any>> {
-        val transcription = streamingService.getPartialTranscription(roomSid)
-        val chunkCount = streamingService.getChunkCount(roomSid)
+        val transcription = streamingService.getTranscription(roomSid)
+        val status = streamingService.getStatus(roomSid)
         
         return ResponseEntity.ok(mapOf(
             "roomSid" to roomSid,
             "transcription" to transcription,
-            "chunkCount" to chunkCount,
-            "isComplete" to false
+            "status" to status
         ))
+    }
+
+    /**
+     * Get processing status
+     */
+    @GetMapping("/status/{roomSid}")
+    fun getStatus(@PathVariable roomSid: String): ResponseEntity<Map<String, Any>> {
+        return ResponseEntity.ok(streamingService.getStatus(roomSid))
     }
 
     /**
