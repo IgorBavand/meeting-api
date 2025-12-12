@@ -22,11 +22,9 @@ data class ProcessedChunk(
 data class OptimizedRoomState(
     val roomSid: String,
     val processedChunks: ConcurrentHashMap<Int, ProcessedChunk> = ConcurrentHashMap(),
-    val pendingChunks: ConcurrentLinkedQueue<PendingChunk> = ConcurrentLinkedQueue(),
     val lastProcessedIndex: AtomicInteger = AtomicInteger(-1),
     @Volatile var isFinalized: Boolean = false,
-    @Volatile var fullTranscription: String? = null,
-    @Volatile var isProcessing: Boolean = false
+    @Volatile var fullTranscription: String? = null
 )
 
 @Service
@@ -38,10 +36,13 @@ class OptimizedStreamingTranscriptionService(
     private val roomStates = ConcurrentHashMap<String, OptimizedRoomState>()
     private val streamingBasePath = "/tmp/streaming"
     
-    // Thread pool for parallel chunk processing
+    // Thread pool for parallel chunk processing - more workers
     private val executor: ExecutorService = Executors.newFixedThreadPool(
-        Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
+        Runtime.getRuntime().availableProcessors().coerceIn(2, 6)
     )
+    
+    // Track active processing per room to enable true parallelism
+    private val activeProcessing = ConcurrentHashMap<String, AtomicInteger>()
 
     init {
         File(streamingBasePath).mkdirs()
@@ -59,58 +60,48 @@ class OptimizedStreamingTranscriptionService(
         logger.info("Queueing chunk $chunkIndex for room $roomSid (${audioData.size} bytes)")
         
         val roomState = roomStates.getOrPut(roomSid) { OptimizedRoomState(roomSid) }
+        activeProcessing.getOrPut(roomSid) { AtomicInteger(0) }
         
         if (roomState.isFinalized) {
             logger.warn("Room $roomSid is already finalized, ignoring chunk $chunkIndex")
             return false
         }
 
-        // Add to pending queue
-        roomState.pendingChunks.add(PendingChunk(chunkIndex, audioData, hasOverlap))
+        val chunk = PendingChunk(chunkIndex, audioData, hasOverlap)
         
-        // Trigger async processing
-        processNextChunks(roomState)
+        // Submit directly to executor for true parallelism
+        executor.submit {
+            processChunkDirect(roomState, chunk)
+        }
         
         return true
     }
 
     /**
-     * Process chunks from queue in parallel but maintain order in results
+     * Process chunk directly - no queue, just process
      */
-    private fun processNextChunks(roomState: OptimizedRoomState) {
-        if (roomState.isProcessing) return
+    private fun processChunkDirect(roomState: OptimizedRoomState, chunk: PendingChunk) {
+        val counter = activeProcessing[roomState.roomSid] ?: AtomicInteger(0)
+        counter.incrementAndGet()
         
-        synchronized(roomState) {
-            if (roomState.isProcessing) return
-            roomState.isProcessing = true
-        }
-
-        executor.submit {
-            try {
-                while (roomState.pendingChunks.isNotEmpty() && !roomState.isFinalized) {
-                    val chunk = roomState.pendingChunks.poll() ?: break
-                    
-                    try {
-                        val result = processChunkFast(roomState, chunk)
-                        if (result != null) {
-                            roomState.processedChunks[chunk.chunkIndex] = result
-                            
-                            // Update last processed index
-                            var current = roomState.lastProcessedIndex.get()
-                            while (chunk.chunkIndex > current) {
-                                if (roomState.lastProcessedIndex.compareAndSet(current, chunk.chunkIndex)) {
-                                    break
-                                }
-                                current = roomState.lastProcessedIndex.get()
-                            }
-                        }
-                    } catch (e: Exception) {
-                        logger.error("Error processing chunk ${chunk.chunkIndex}", e)
+        try {
+            val result = processChunkFast(roomState, chunk)
+            if (result != null) {
+                roomState.processedChunks[chunk.chunkIndex] = result
+                
+                // Update last processed index atomically
+                var current = roomState.lastProcessedIndex.get()
+                while (chunk.chunkIndex > current) {
+                    if (roomState.lastProcessedIndex.compareAndSet(current, chunk.chunkIndex)) {
+                        break
                     }
+                    current = roomState.lastProcessedIndex.get()
                 }
-            } finally {
-                roomState.isProcessing = false
             }
+        } catch (e: Exception) {
+            logger.error("Error processing chunk ${chunk.chunkIndex}", e)
+        } finally {
+            counter.decrementAndGet()
         }
     }
 
@@ -274,18 +265,32 @@ class OptimizedStreamingTranscriptionService(
             return ""
         }
 
-        // Wait for pending chunks to complete (max 30 seconds)
-        val deadline = System.currentTimeMillis() + 30_000
-        while (roomState.pendingChunks.isNotEmpty() && System.currentTimeMillis() < deadline) {
-            Thread.sleep(500)
-        }
-
+        // Mark as finalized to stop accepting new chunks
         roomState.isFinalized = true
+
+        // Wait for active processing to complete (max 15 seconds)
+        val counter = activeProcessing[roomSid]
+        val deadline = System.currentTimeMillis() + 15_000
+        var lastCount = roomState.processedChunks.size
+        
+        while (System.currentTimeMillis() < deadline) {
+            val activeCount = counter?.get() ?: 0
+            if (activeCount == 0) break
+            
+            Thread.sleep(200)
+            
+            // Check if making progress
+            val currentCount = roomState.processedChunks.size
+            if (currentCount > lastCount) {
+                lastCount = currentCount
+            }
+        }
         
         val transcription = buildOrderedTranscription(roomState)
         roomState.fullTranscription = transcription
         
-        logger.info("Finalized room $roomSid: ${transcription.length} chars from ${roomState.processedChunks.size} chunks")
+        val activeCount = counter?.get() ?: 0
+        logger.info("Finalized room $roomSid: ${transcription.length} chars from ${roomState.processedChunks.size} chunks ($activeCount still active)")
         
         // Cleanup
         cleanupRoom(roomSid)
@@ -300,15 +305,16 @@ class OptimizedStreamingTranscriptionService(
         val roomState = roomStates[roomSid] ?: return mapOf(
             "exists" to false,
             "processedChunks" to 0,
-            "pendingChunks" to 0
+            "activeProcessing" to 0
         )
+        
+        val activeCount = activeProcessing[roomSid]?.get() ?: 0
         
         return mapOf(
             "exists" to true,
             "processedChunks" to roomState.processedChunks.size,
-            "pendingChunks" to roomState.pendingChunks.size,
+            "activeProcessing" to activeCount,
             "isFinalized" to roomState.isFinalized,
-            "isProcessing" to roomState.isProcessing,
             "lastProcessedIndex" to roomState.lastProcessedIndex.get()
         )
     }

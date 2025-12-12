@@ -66,7 +66,7 @@ class WhisperTranscriptionService(
         }
 
         return try {
-            // Optimized for SPEED - use smaller beam/best-of for faster processing
+            // BALANCED: Good quality with acceptable speed
             val command = mutableListOf(
                 whisperPath,
                 "-m", modelFile.absolutePath,
@@ -75,10 +75,10 @@ class WhisperTranscriptionService(
                 "-l", whisperLanguage,
                 "-np",                // no prints (cleaner output)
                 "-nt",                // no timestamps
-                // SPEED optimized parameters
-                "-bs", "1",           // beam-size 1 for speed (was 8)
-                "-bo", "1",           // best-of 1 for speed (was 8)
-                "-mc", "64",          // reduced context for speed
+                // BALANCED parameters - quality + speed
+                "-bs", "3",           // beam-size 3 (balance)
+                "-bo", "3",           // best-of 3 (balance)
+                "-mc", "64",          // context 64 tokens
                 "-sns",               // suppress non-speech tokens
                 "--flash-attn"        // enable flash attention for speed
             )
