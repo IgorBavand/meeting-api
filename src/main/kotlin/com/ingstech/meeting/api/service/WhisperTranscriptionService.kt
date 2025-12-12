@@ -20,7 +20,7 @@ class WhisperTranscriptionService(
     @Value("\${whisper.docker.model.path:/models/ggml-base.bin}") private val dockerModelPath: String,
     @Value("\${whisper.http.url:http://localhost:9000}") private val httpUrl: String,
     @Value("\${whisper.path:/opt/homebrew/bin/whisper-cli}") private val whisperPath: String,
-    @Value("\${whisper.model:base}") private val whisperModel: String,
+    @Value("\${whisper.model:medium}") private val whisperModel: String,
     @Value("\${whisper.language:pt}") private val whisperLanguage: String,
     @Value("\${whisper.threads:4}") private val threads: Int,
     @Value("\${whisper.models.path:/tmp/whisper-models}") private val modelsPath: String,
@@ -30,19 +30,23 @@ class WhisperTranscriptionService(
     private val httpClient = HttpClient.newBuilder().build()
 
     fun transcribe(audioPath: Path): String? {
+        return transcribeWithContext(audioPath, "")
+    }
+
+    fun transcribeWithContext(audioPath: Path, contextPrompt: String): String? {
         logger.info("Transcribing audio file: ${audioPath.fileName} using mode: $whisperMode")
         
         return when (whisperMode.lowercase()) {
-            "docker" -> transcribeViaDocker(audioPath)
+            "docker" -> transcribeViaDocker(audioPath, contextPrompt)
             "http", "api" -> transcribeViaHttp(audioPath)
-            else -> transcribeViaLocal(audioPath)
+            else -> transcribeViaLocal(audioPath, contextPrompt)
         }
     }
 
     /**
-     * Transcribe via local whisper-cli (Homebrew installation)
+     * Transcribe via local whisper-cli with optimized parameters for accuracy
      */
-    private fun transcribeViaLocal(audioPath: Path): String? {
+    private fun transcribeViaLocal(audioPath: Path, contextPrompt: String): String? {
         val audioFile = audioPath.toFile()
         
         if (!audioFile.exists()) {
@@ -57,19 +61,29 @@ class WhisperTranscriptionService(
         }
 
         return try {
-            val command = listOf(
+            val command = mutableListOf(
                 whisperPath,
                 "-m", modelFile.absolutePath,
                 "-f", audioFile.absolutePath,
                 "-t", threads.toString(),
-                "-bs", "5",           // beam-size 5 for better accuracy
-                "-bo", "5",           // best-of 5 for better accuracy
                 "-l", whisperLanguage,
-                "-np",                // no prints
+                "-np",                // no prints (cleaner output)
                 "-nt",                // no timestamps
-                "-mc", "64",          // max-context for better accuracy
-                "-sns"                // suppress non-speech tokens (removes [MUSIC], etc)
+                // Optimized parameters for accuracy
+                "-bs", "8",           // beam-size 8 for better accuracy
+                "-bo", "8",           // best-of 8
+                "-mc", "128",         // max-context 128 tokens for better continuity
+                "-wt", "0.01",        // word threshold for timestamps
+                "-et", "2.8",         // entropy threshold (higher = more strict)
+                "-lpt", "-0.5",       // log probability threshold
+                "-sns",               // suppress non-speech tokens
+                "-nf"                 // no fallback (use greedy if beam fails)
             )
+
+            // Add context prompt if available (helps maintain conversation continuity)
+            if (contextPrompt.isNotBlank()) {
+                command.addAll(listOf("--prompt", contextPrompt.take(224)))  // Max 224 chars
+            }
 
             logger.info("Running Whisper command: ${command.joinToString(" ")}")
 
@@ -85,7 +99,7 @@ class WhisperTranscriptionService(
                 output.appendLine(line)
             }
 
-            val completed = process.waitFor(300, TimeUnit.SECONDS)
+            val completed = process.waitFor(600, TimeUnit.SECONDS)  // 10 min timeout for medium model
 
             if (!completed) {
                 process.destroyForcibly()
@@ -98,7 +112,7 @@ class WhisperTranscriptionService(
                 return null
             }
 
-            // Parse output - whisper-cli outputs transcription directly
+            // Parse output
             val transcription = extractTranscriptionFromOutput(output.toString())
             
             if (transcription.isNullOrBlank()) {
@@ -118,24 +132,31 @@ class WhisperTranscriptionService(
     /**
      * Transcribe via Docker container execution
      */
-    private fun transcribeViaDocker(audioPath: Path): String? {
+    private fun transcribeViaDocker(audioPath: Path, contextPrompt: String): String? {
         val audioFile = audioPath.toFile()
 
         return try {
             val containerAudioPath = "/audio/${audioFile.name}"
 
-            val command = listOf(
+            val command = mutableListOf(
                 "docker", "exec", dockerContainer,
                 "whisper-cli",
                 "-m", dockerModelPath,
                 "-f", containerAudioPath,
                 "-t", threads.toString(),
-                "-bs", "1",
-                "-bo", "1",
-                "--no-timestamps",
-                "-l", "auto",
-                "-np"
+                "-l", whisperLanguage,
+                "-np",
+                "-nt",
+                "-bs", "8",
+                "-bo", "8",
+                "-mc", "128",
+                "-sns",
+                "-nf"
             )
+
+            if (contextPrompt.isNotBlank()) {
+                command.addAll(listOf("--prompt", contextPrompt.take(224)))
+            }
 
             logger.info("Running Whisper via Docker: ${command.joinToString(" ")}")
 
@@ -144,7 +165,7 @@ class WhisperTranscriptionService(
                 .start()
 
             val output = process.inputStream.bufferedReader().readText()
-            val completed = process.waitFor(300, TimeUnit.SECONDS)
+            val completed = process.waitFor(600, TimeUnit.SECONDS)
 
             if (!completed) {
                 process.destroyForcibly()
@@ -182,7 +203,7 @@ class WhisperTranscriptionService(
             val fullBody = bodyPrefix + audioBytes + bodySuffix
 
             val request = HttpRequest.newBuilder()
-                .uri(URI.create("$httpUrl/asr?output=txt&language=auto"))
+                .uri(URI.create("$httpUrl/asr?output=txt&language=$whisperLanguage"))
                 .header("Content-Type", "multipart/form-data; boundary=$boundary")
                 .POST(HttpRequest.BodyPublishers.ofByteArray(fullBody))
                 .build()
@@ -209,7 +230,7 @@ class WhisperTranscriptionService(
         // Filter out whisper log lines and extract only transcription
         val logPrefixes = listOf(
             "whisper_", "main:", "ggml_", "system_info:", "warning:", 
-            "main: processing", "main: WARNING", "=", "size"
+            "main: processing", "main: WARNING", "=", "size", "output_"
         )
         
         val lines = output.lines()
@@ -224,6 +245,9 @@ class WhisperTranscriptionService(
                 !line.contains("MB") &&
                 !line.contains("ms per run") &&
                 !line.contains("total time") &&
+                !line.contains("encode time") &&
+                !line.contains("decode time") &&
+                !line.contains("sample time") &&
                 !line.matches(Regex("^\\s*$"))
             }
             .joinToString(" ")

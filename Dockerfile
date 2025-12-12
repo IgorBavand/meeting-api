@@ -76,9 +76,9 @@ RUN find /tmp/whisper-build -name "*.so*" -exec cp {} /usr/local/lib/ \; && \
 # Create directory for whisper models
 RUN mkdir -p /app/models
 
-# Download Whisper model (small - best balance for Portuguese)
-RUN curl -L -o /app/models/ggml-small.bin \
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+# Download Whisper model (medium - best quality for Portuguese)
+RUN curl -L -o /app/models/ggml-medium.bin \
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin"
 
 # Create directories for temporary files
 RUN mkdir -p /tmp/streaming /tmp/recordings
@@ -87,14 +87,14 @@ RUN mkdir -p /tmp/streaming /tmp/recordings
 COPY --from=java-builder /app/target/*.jar app.jar
 
 # Environment variables for Railway
-ENV JAVA_OPTS="-Xmx512m -Xms256m"
+ENV JAVA_OPTS="-Xmx1024m -Xms512m"
 ENV SERVER_PORT=8080
 ENV WHISPER_MODE=local
 ENV WHISPER_PATH=/usr/local/bin/whisper-cli
 ENV WHISPER_MODELS_PATH=/app/models
-ENV WHISPER_MODEL=small
+ENV WHISPER_MODEL=medium
 ENV WHISPER_LANGUAGE=pt
-ENV WHISPER_THREADS=2
+ENV WHISPER_THREADS=4
 ENV FFMPEG_PATH=/usr/bin/ffmpeg
 ENV LD_LIBRARY_PATH=/usr/local/lib
 
