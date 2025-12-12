@@ -1,86 +1,80 @@
 package com.ingstech.meeting.api.controller
 
-import com.ingstech.meeting.api.domain.RoomProcessingState
-import com.ingstech.meeting.api.domain.RoomSummaryResult
-import com.ingstech.meeting.api.domain.RoomTranscriptionResult
-import com.ingstech.meeting.api.service.RoomProcessingService
+import com.ingstech.meeting.api.service.AssemblyAITranscriptionService
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
 
 @RestController
 @RequestMapping("/api/v1/rooms")
 class RoomTranscriptionController(
-    private val roomProcessingService: RoomProcessingService
+    private val assemblyAIService: AssemblyAITranscriptionService
 ) {
 
     /**
      * Get transcription for a specific room
      */
     @GetMapping("/{roomSid}/transcription")
-    fun getTranscription(@PathVariable roomSid: String): ResponseEntity<RoomTranscriptionResult> {
-        val result = roomProcessingService.getTranscription(roomSid)
-        return if (result != null) {
-            ResponseEntity.ok(result)
-        } else {
-            ResponseEntity.notFound().build()
-        }
+    fun getTranscription(@PathVariable roomSid: String): ResponseEntity<Map<String, Any>> {
+        val transcription = assemblyAIService.getTranscription(roomSid)
+        val status = assemblyAIService.getStatus(roomSid)
+        
+        return ResponseEntity.ok(mapOf(
+            "roomSid" to roomSid,
+            "transcription" to transcription,
+            "status" to if (status["isFinalized"] == true) "COMPLETED" else "PROCESSING",
+            "processedChunks" to (status["processedChunks"] ?: 0)
+        ))
     }
 
     /**
      * Get summary for a specific room
      */
     @GetMapping("/{roomSid}/summary")
-    fun getSummary(@PathVariable roomSid: String): ResponseEntity<RoomSummaryResult> {
-        val result = roomProcessingService.getSummary(roomSid)
-        return if (result != null) {
-            ResponseEntity.ok(result)
-        } else {
-            ResponseEntity.notFound().build()
-        }
+    fun getSummary(@PathVariable roomSid: String): ResponseEntity<Map<String, Any?>> {
+        val summary = assemblyAIService.getSummary(roomSid)
+        
+        return ResponseEntity.ok(mapOf(
+            "roomSid" to roomSid,
+            "summary" to summary,
+            "status" to if (summary != null) "COMPLETED" else "PENDING"
+        ))
     }
 
     /**
-     * Get full processing state for a room
+     * Get processing status for a room
      */
     @GetMapping("/{roomSid}/status")
-    fun getProcessingStatus(@PathVariable roomSid: String): ResponseEntity<RoomProcessingState> {
-        val state = roomProcessingService.getProcessingState(roomSid)
-        return if (state != null) {
-            ResponseEntity.ok(state)
-        } else {
-            ResponseEntity.notFound().build()
-        }
-    }
-
-    /**
-     * List all processed rooms
-     */
-    @GetMapping
-    fun listProcessedRooms(): ResponseEntity<List<String>> {
-        return ResponseEntity.ok(roomProcessingService.listAllProcessedRooms())
+    fun getProcessingStatus(@PathVariable roomSid: String): ResponseEntity<Map<String, Any>> {
+        return ResponseEntity.ok(assemblyAIService.getStatus(roomSid))
     }
 
     /**
      * Get both transcription and summary in one call
-     * Returns PENDING status if room is not yet processed
      */
     @GetMapping("/{roomSid}/full")
     fun getFullResult(@PathVariable roomSid: String): ResponseEntity<Map<String, Any?>> {
-        val transcription = roomProcessingService.getTranscription(roomSid)
-        val summary = roomProcessingService.getSummary(roomSid)
+        val status = assemblyAIService.getStatus(roomSid)
+        val transcription = assemblyAIService.getTranscription(roomSid)
+        val summary = assemblyAIService.getSummary(roomSid)
         
-        // Always return 200 with status info, even if not yet processed
+        val overallStatus = when {
+            status["exists"] == false -> "NOT_FOUND"
+            status["activeProcessing"] as? Int ?: 0 > 0 -> "PROCESSING"
+            transcription.isBlank() -> "PENDING"
+            summary == null -> "TRANSCRIPTION_COMPLETE"
+            else -> "COMPLETE"
+        }
+        
         return ResponseEntity.ok(mapOf(
             "roomSid" to roomSid,
-            "transcription" to transcription,
+            "transcription" to mapOf(
+                "text" to transcription,
+                "status" to if (transcription.isNotBlank()) "COMPLETED" else "PENDING"
+            ),
             "summary" to summary,
-            "status" to when {
-                transcription == null -> "PENDING"
-                transcription.status.name == "PROCESSING" -> "PROCESSING"
-                summary == null -> "TRANSCRIPTION_COMPLETE"
-                summary.status.name == "PROCESSING" -> "SUMMARIZING"
-                else -> "COMPLETE"
-            }
+            "status" to overallStatus,
+            "processedChunks" to (status["processedChunks"] ?: 0),
+            "activeProcessing" to (status["activeProcessing"] ?: 0)
         ))
     }
 }

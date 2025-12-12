@@ -1,31 +1,12 @@
 # ==============================================================================
 # Meeting API - Dockerfile for Railway Deployment
 # ==============================================================================
-# Multi-stage build for optimized image size
-# Includes: Java 21, FFmpeg, Whisper.cpp, and Whisper model
+# Optimized build with Java 21 and FFmpeg
+# Uses AssemblyAI for transcription (no local Whisper needed)
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
-# Stage 1: Build Whisper.cpp from source
-# ------------------------------------------------------------------------------
-FROM ubuntu:22.04 AS whisper-builder
-
-RUN apt-get update && apt-get install -y \
-    git \
-    build-essential \
-    cmake \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /build
-
-# Clone and build whisper.cpp with shared library
-RUN git clone https://github.com/ggerganov/whisper.cpp.git && \
-    cd whisper.cpp && \
-    cmake -B build -DBUILD_SHARED_LIBS=ON && \
-    cmake --build build --config Release -j$(nproc)
-
-# ------------------------------------------------------------------------------
-# Stage 2: Build Java application
+# Stage 1: Build Java application
 # ------------------------------------------------------------------------------
 FROM eclipse-temurin:21-jdk AS java-builder
 
@@ -49,11 +30,11 @@ COPY src ./src
 RUN ./mvnw package -DskipTests -B
 
 # ------------------------------------------------------------------------------
-# Stage 3: Final runtime image
+# Stage 2: Final runtime image
 # ------------------------------------------------------------------------------
 FROM eclipse-temurin:21-jre
 
-# Install FFmpeg and required libraries
+# Install FFmpeg for audio conversion
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
@@ -61,60 +42,23 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy whisper-cli binary and all shared libraries from builder
-COPY --from=whisper-builder /build/whisper.cpp/build/bin/whisper-cli /usr/local/bin/whisper-cli
-
-# Copy all .so files from the build directory
-COPY --from=whisper-builder /build/whisper.cpp/build/ /tmp/whisper-build/
-
-# Find and copy all shared libraries
-RUN find /tmp/whisper-build -name "*.so*" -exec cp {} /usr/local/lib/ \; && \
-    rm -rf /tmp/whisper-build && \
-    chmod +x /usr/local/bin/whisper-cli && \
-    ldconfig
-
-# Create directory for whisper models
-RUN mkdir -p /app/models
-
-# Download Whisper models (medium for quality, small as fallback)
-RUN curl -L -o /app/models/ggml-medium.bin \
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin" && \
-    curl -L -o /app/models/ggml-small.bin \
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
-
 # Create directories for temporary files
 RUN mkdir -p /tmp/streaming /tmp/recordings
 
 # Copy the built JAR from java-builder
 COPY --from=java-builder /app/target/*.jar app.jar
 
-# Environment variables for Railway
-ENV JAVA_OPTS="-Xmx768m -Xms256m"
+# Environment variables
+ENV JAVA_OPTS="-Xmx512m -Xms256m"
 ENV SERVER_PORT=8080
-ENV WHISPER_MODE=local
-ENV WHISPER_PATH=/usr/local/bin/whisper-cli
-ENV WHISPER_MODELS_PATH=/app/models
-ENV WHISPER_MODEL=small
-ENV WHISPER_LANGUAGE=pt
-ENV WHISPER_THREADS=4
 ENV FFMPEG_PATH=/usr/bin/ffmpeg
-ENV LD_LIBRARY_PATH=/usr/local/lib
 
 # Expose port
 EXPOSE 8080
 
-# Startup script to verify environment
-RUN echo '#!/bin/bash\n\
-echo "=== Meeting API Startup ==="\n\
-echo "Checking whisper-cli..."\n\
-whisper-cli --help > /dev/null 2>&1 && echo "✓ whisper-cli OK" || echo "✗ whisper-cli FAILED"\n\
-echo "Checking models..."\n\
-ls -la /app/models/\n\
-echo "Checking ffmpeg..."\n\
-ffmpeg -version | head -1\n\
-echo "Starting Java application..."\n\
-exec java $JAVA_OPTS -jar app.jar\n\
-' > /app/start.sh && chmod +x /app/start.sh
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD curl -f http://localhost:8080/actuator/health || exit 1
 
 # Run the application
-ENTRYPOINT ["/app/start.sh"]
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]

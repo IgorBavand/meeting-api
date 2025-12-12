@@ -19,19 +19,12 @@ data class AssemblyAIRoomState(
     val chunks: ConcurrentHashMap<Int, String> = ConcurrentHashMap(),
     val lastChunkIndex: AtomicInteger = AtomicInteger(-1),
     @Volatile var isFinalized: Boolean = false,
-    @Volatile var fullTranscription: String? = null
+    @Volatile var fullTranscription: String? = null,
+    @Volatile var summary: Map<String, Any?>? = null
 )
 
 data class AssemblyAIUploadResponse(
     val upload_url: String
-)
-
-data class AssemblyAITranscriptRequest(
-    val audio_url: String,
-    val language_code: String = "pt",
-    val punctuate: Boolean = true,
-    val format_text: Boolean = true,
-    val speech_model: String = "best"
 )
 
 data class AssemblyAITranscriptResponse(
@@ -65,7 +58,7 @@ class AssemblyAITranscriptionService(
     private val streamingBasePath = "/tmp/streaming"
     
     private val executor: ExecutorService = Executors.newFixedThreadPool(
-        Runtime.getRuntime().availableProcessors().coerceIn(4, 8)
+        Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
     )
     
     private val activeProcessing = ConcurrentHashMap<String, AtomicInteger>()
@@ -86,43 +79,40 @@ class AssemblyAITranscriptionService(
         logger.info("Queueing chunk $chunkIndex for room $roomSid (${audioData.size} bytes)")
         
         val roomState = roomStates.getOrPut(roomSid) { AssemblyAIRoomState(roomSid) }
-        activeProcessing.getOrPut(roomSid) { AtomicInteger(0) }
+        val counter = activeProcessing.getOrPut(roomSid) { AtomicInteger(0) }
         
         if (roomState.isFinalized) {
             logger.warn("Room $roomSid is already finalized, ignoring chunk $chunkIndex")
             return false
         }
 
-        // Submit directly to executor
+        counter.incrementAndGet()
+        
         executor.submit {
-            processChunk(roomState, chunkIndex, audioData)
+            try {
+                processChunk(roomState, chunkIndex, audioData)
+            } finally {
+                counter.decrementAndGet()
+            }
         }
         
         return true
     }
 
-    /**
-     * Process a single chunk with AssemblyAI
-     */
     private fun processChunk(roomState: AssemblyAIRoomState, chunkIndex: Int, audioData: ByteArray) {
-        val counter = activeProcessing[roomState.roomSid] ?: AtomicInteger(0)
-        counter.incrementAndGet()
-        
         val startTime = System.currentTimeMillis()
+        val roomDir = File("$streamingBasePath/${roomState.roomSid}")
+        roomDir.mkdirs()
+        
+        val chunkFile = File(roomDir, "chunk_$chunkIndex.webm")
+        chunkFile.writeBytes(audioData)
         
         try {
-            val roomDir = File("$streamingBasePath/${roomState.roomSid}")
-            roomDir.mkdirs()
-            
-            val chunkFile = File(roomDir, "chunk_${chunkIndex}.webm")
-            chunkFile.writeBytes(audioData)
-            
-            // Convert to WAV (AssemblyAI supports many formats but WAV is reliable)
+            // Convert to WAV
             val convertedPath = audioConverterService.convertToPcm16(chunkFile.toPath())
             
             if (convertedPath == null) {
                 logger.warn("Failed to convert chunk $chunkIndex")
-                chunkFile.delete()
                 return
             }
             
@@ -133,7 +123,7 @@ class AssemblyAITranscriptionService(
             chunkFile.delete()
             convertedPath.toFile().delete()
             
-            if (!transcription.isNullOrBlank()) {
+            if (!transcription.isNullOrBlank() && transcription.length > 3) {
                 roomState.chunks[chunkIndex] = transcription
                 
                 // Update last index
@@ -145,12 +135,13 @@ class AssemblyAITranscriptionService(
                 
                 val elapsed = System.currentTimeMillis() - startTime
                 logger.info("Chunk $chunkIndex transcribed in ${elapsed}ms: ${transcription.take(50)}...")
+            } else {
+                logger.warn("Empty or invalid transcription for chunk $chunkIndex")
             }
             
         } catch (e: Exception) {
             logger.error("Error processing chunk $chunkIndex", e)
-        } finally {
-            counter.decrementAndGet()
+            chunkFile.delete()
         }
     }
 
@@ -182,9 +173,6 @@ class AssemblyAITranscriptionService(
         }
     }
 
-    /**
-     * Upload file to AssemblyAI
-     */
     private fun uploadFile(audioPath: Path): String? {
         val file = audioPath.toFile()
         if (!file.exists()) {
@@ -210,9 +198,6 @@ class AssemblyAITranscriptionService(
         return uploadResponse.upload_url
     }
 
-    /**
-     * Create transcription request
-     */
     private fun createTranscription(audioUrl: String): String? {
         val requestBody = objectMapper.writeValueAsString(
             mapOf(
@@ -242,12 +227,9 @@ class AssemblyAITranscriptionService(
         return transcriptResponse.id
     }
 
-    /**
-     * Poll for transcription result
-     */
     private fun pollTranscription(transcriptId: String): String? {
-        val maxAttempts = 60 // 30 seconds max
-        val pollInterval = 500L // 500ms between polls
+        val maxAttempts = 120 // 60 seconds max
+        val pollInterval = 500L
         
         repeat(maxAttempts) { attempt ->
             val request = HttpRequest.newBuilder()
@@ -259,7 +241,6 @@ class AssemblyAITranscriptionService(
             val response = httpClient.send(request, HttpResponse.BodyHandlers.ofString())
             
             if (response.statusCode() != 200) {
-                logger.warn("Poll attempt $attempt failed: ${response.statusCode()}")
                 Thread.sleep(pollInterval)
                 return@repeat
             }
@@ -267,17 +248,12 @@ class AssemblyAITranscriptionService(
             val transcriptResponse = objectMapper.readValue<AssemblyAITranscriptResponse>(response.body())
             
             when (transcriptResponse.status) {
-                "completed" -> {
-                    return transcriptResponse.text
-                }
+                "completed" -> return transcriptResponse.text
                 "error" -> {
                     logger.error("Transcription error: ${transcriptResponse.error}")
                     return null
                 }
-                else -> {
-                    // Still processing
-                    Thread.sleep(pollInterval)
-                }
+                else -> Thread.sleep(pollInterval)
             }
         }
         
@@ -296,16 +272,22 @@ class AssemblyAITranscriptionService(
             return ""
         }
 
+        // Return cached if already finalized
+        if (roomState.fullTranscription != null) {
+            return roomState.fullTranscription!!
+        }
+
         roomState.isFinalized = true
 
-        // Wait for active processing (max 30 seconds for AssemblyAI)
+        // Wait for active processing (max 60 seconds)
         val counter = activeProcessing[roomSid]
-        val deadline = System.currentTimeMillis() + 30_000
+        val deadline = System.currentTimeMillis() + 60_000
         
         while (System.currentTimeMillis() < deadline) {
             val activeCount = counter?.get() ?: 0
             if (activeCount == 0) break
-            Thread.sleep(300)
+            logger.info("Waiting for $activeCount active transcriptions...")
+            Thread.sleep(500)
         }
         
         val transcription = buildOrderedTranscription(roomState)
@@ -313,14 +295,9 @@ class AssemblyAITranscriptionService(
         
         logger.info("Finalized room $roomSid: ${transcription.length} chars from ${roomState.chunks.size} chunks")
         
-        cleanupRoom(roomSid)
-        
         return transcription
     }
 
-    /**
-     * Build transcription in order
-     */
     private fun buildOrderedTranscription(roomState: AssemblyAIRoomState): String {
         val chunks = roomState.chunks.entries
             .sortedBy { it.key }
@@ -349,16 +326,13 @@ class AssemblyAITranscriptionService(
         return result.toString().replace(Regex("\\s+"), " ").trim()
     }
 
-    /**
-     * Remove overlap between chunks
-     */
     private fun removeOverlap(newText: String, prevText: String): String {
         val prevWords = prevText.split("\\s+".toRegex()).takeLast(15)
         val newWords = newText.split("\\s+".toRegex())
         
         if (prevWords.isEmpty() || newWords.isEmpty()) return newText
         
-        for (matchSize in minOf(10, prevWords.size, newWords.size) downTo 2) {
+        for (matchSize in minOf(10, prevWords.size, newWords.size) downTo 3) {
             val prevEnd = prevWords.takeLast(matchSize).joinToString(" ").lowercase()
             val newStart = newWords.take(matchSize).joinToString(" ").lowercase()
             
@@ -370,9 +344,6 @@ class AssemblyAITranscriptionService(
         return newText
     }
 
-    /**
-     * Get current transcription
-     */
     fun getTranscription(roomSid: String): String {
         val roomState = roomStates[roomSid] ?: return ""
         
@@ -383,14 +354,20 @@ class AssemblyAITranscriptionService(
         return buildOrderedTranscription(roomState)
     }
 
-    /**
-     * Get status
-     */
+    fun setSummary(roomSid: String, summary: Map<String, Any?>) {
+        roomStates[roomSid]?.summary = summary
+    }
+
+    fun getSummary(roomSid: String): Map<String, Any?>? {
+        return roomStates[roomSid]?.summary
+    }
+
     fun getStatus(roomSid: String): Map<String, Any> {
         val roomState = roomStates[roomSid] ?: return mapOf(
             "exists" to false,
             "processedChunks" to 0,
-            "activeProcessing" to 0
+            "activeProcessing" to 0,
+            "isFinalized" to false
         )
         
         val activeCount = activeProcessing[roomSid]?.get() ?: 0
@@ -400,7 +377,9 @@ class AssemblyAITranscriptionService(
             "processedChunks" to roomState.chunks.size,
             "activeProcessing" to activeCount,
             "isFinalized" to roomState.isFinalized,
-            "lastChunkIndex" to roomState.lastChunkIndex.get()
+            "lastChunkIndex" to roomState.lastChunkIndex.get(),
+            "hasTranscription" to (roomState.fullTranscription != null),
+            "hasSummary" to (roomState.summary != null)
         )
     }
 
@@ -408,7 +387,10 @@ class AssemblyAITranscriptionService(
         return roomStates[roomSid]?.chunks?.size ?: 0
     }
 
-    private fun cleanupRoom(roomSid: String) {
+    fun clearRoom(roomSid: String) {
+        roomStates.remove(roomSid)
+        activeProcessing.remove(roomSid)
+        
         try {
             val roomDir = File("$streamingBasePath/$roomSid")
             if (roomDir.exists()) {
@@ -417,11 +399,5 @@ class AssemblyAITranscriptionService(
         } catch (e: Exception) {
             logger.warn("Failed to cleanup room $roomSid", e)
         }
-    }
-
-    fun clearRoom(roomSid: String) {
-        roomStates.remove(roomSid)
-        activeProcessing.remove(roomSid)
-        cleanupRoom(roomSid)
     }
 }

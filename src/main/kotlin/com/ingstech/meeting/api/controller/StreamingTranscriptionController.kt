@@ -94,24 +94,39 @@ class StreamingTranscriptionController(
     @PostMapping("/finalize-with-summary")
     fun finalizeWithSummary(
         @RequestBody request: FinalizeRequest
-    ): ResponseEntity<Map<String, Any>> {
+    ): ResponseEntity<Map<String, Any?>> {
         
         logger.info("Finalizing transcription with summary for room ${request.roomSid}")
 
         val fullTranscription = assemblyAIService.finalizeTranscription(request.roomSid)
         
         // Generate summary with Gemini
-        val summary = geminiService.generateSummary(
+        val summaryResult = geminiService.generateSummary(
             roomSid = request.roomSid,
             roomName = request.roomName,
             transcription = fullTranscription
         )
+        
+        // Convert to map and save
+        val summaryMap = mapOf(
+            "generalSummary" to summaryResult.generalSummary,
+            "topicsDiscussed" to summaryResult.topicsDiscussed,
+            "decisionsMade" to summaryResult.decisionsMade,
+            "nextSteps" to summaryResult.nextSteps,
+            "participantsMentioned" to summaryResult.participantsMentioned,
+            "issuesRaised" to summaryResult.issuesRaised,
+            "overallSentiment" to summaryResult.overallSentiment,
+            "status" to summaryResult.status.name
+        )
+        
+        assemblyAIService.setSummary(request.roomSid, summaryMap)
 
         return ResponseEntity.ok(mapOf(
             "success" to true,
             "roomSid" to request.roomSid,
             "fullTranscription" to fullTranscription,
-            "summary" to summary
+            "summary" to summaryMap,
+            "wordCount" to fullTranscription.split("\\s+".toRegex()).filter { it.isNotBlank() }.size
         ))
     }
 
