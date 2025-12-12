@@ -61,9 +61,10 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy whisper-cli binary and shared library from builder
+# Copy whisper-cli binary and all shared libraries from builder
 COPY --from=whisper-builder /build/whisper.cpp/build/bin/whisper-cli /usr/local/bin/whisper-cli
 COPY --from=whisper-builder /build/whisper.cpp/build/src/libwhisper.so* /usr/local/lib/
+COPY --from=whisper-builder /build/whisper.cpp/build/ggml/src/libggml*.so* /usr/local/lib/
 RUN chmod +x /usr/local/bin/whisper-cli && \
     ldconfig
 
