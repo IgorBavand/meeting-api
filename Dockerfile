@@ -76,9 +76,11 @@ RUN find /tmp/whisper-build -name "*.so*" -exec cp {} /usr/local/lib/ \; && \
 # Create directory for whisper models
 RUN mkdir -p /app/models
 
-# Download Whisper model (medium - best quality for Portuguese)
+# Download Whisper models (medium for quality, small as fallback)
 RUN curl -L -o /app/models/ggml-medium.bin \
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin"
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin" && \
+    curl -L -o /app/models/ggml-small.bin \
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
 
 # Create directories for temporary files
 RUN mkdir -p /tmp/streaming /tmp/recordings
@@ -101,5 +103,18 @@ ENV LD_LIBRARY_PATH=/usr/local/lib
 # Expose port
 EXPOSE 8080
 
+# Startup script to verify environment
+RUN echo '#!/bin/bash\n\
+echo "=== Meeting API Startup ==="\n\
+echo "Checking whisper-cli..."\n\
+whisper-cli --help > /dev/null 2>&1 && echo "✓ whisper-cli OK" || echo "✗ whisper-cli FAILED"\n\
+echo "Checking models..."\n\
+ls -la /app/models/\n\
+echo "Checking ffmpeg..."\n\
+ffmpeg -version | head -1\n\
+echo "Starting Java application..."\n\
+exec java $JAVA_OPTS -jar app.jar\n\
+' > /app/start.sh && chmod +x /app/start.sh
+
 # Run the application
-ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]
+ENTRYPOINT ["/app/start.sh"]

@@ -54,11 +54,13 @@ class WhisperTranscriptionService(
             return null
         }
 
-        val modelFile = File("$modelsPath/ggml-$whisperModel.bin")
-        if (!modelFile.exists()) {
-            logger.error("Model file does not exist: ${modelFile.absolutePath}")
+        // Try to find model with fallback
+        val modelFile = findModelFile()
+        if (modelFile == null) {
+            logger.error("No Whisper model found in $modelsPath")
             return null
         }
+        logger.info("Using model: ${modelFile.name}")
 
         return try {
             val command = mutableListOf(
@@ -266,5 +268,35 @@ class WhisperTranscriptionService(
     fun transcribeMultiple(audioPaths: List<Path>): String {
         return audioPaths.mapNotNull { transcribe(it) }
             .joinToString("\n\n")
+    }
+
+    /**
+     * Find the best available model file with fallback
+     */
+    private fun findModelFile(): File? {
+        // Priority order: configured model, then fallbacks
+        val modelPriority = listOf(whisperModel, "medium", "small", "base")
+        
+        for (model in modelPriority) {
+            val file = File("$modelsPath/ggml-$model.bin")
+            if (file.exists()) {
+                if (model != whisperModel) {
+                    logger.warn("Configured model '$whisperModel' not found, using fallback: $model")
+                }
+                return file
+            }
+        }
+        
+        // Try to find any .bin file
+        val modelsDir = File(modelsPath)
+        if (modelsDir.exists() && modelsDir.isDirectory) {
+            val anyModel = modelsDir.listFiles()?.firstOrNull { it.name.endsWith(".bin") }
+            if (anyModel != null) {
+                logger.warn("Using first available model: ${anyModel.name}")
+                return anyModel
+            }
+        }
+        
+        return null
     }
 }
