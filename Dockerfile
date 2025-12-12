@@ -18,10 +18,10 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /build
 
-# Clone and build whisper.cpp
+# Clone and build whisper.cpp with shared library
 RUN git clone https://github.com/ggerganov/whisper.cpp.git && \
     cd whisper.cpp && \
-    cmake -B build && \
+    cmake -B build -DBUILD_SHARED_LIBS=ON && \
     cmake --build build --config Release -j$(nproc)
 
 # ------------------------------------------------------------------------------
@@ -61,9 +61,11 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy whisper-cli binary from builder
+# Copy whisper-cli binary and shared library from builder
 COPY --from=whisper-builder /build/whisper.cpp/build/bin/whisper-cli /usr/local/bin/whisper-cli
-RUN chmod +x /usr/local/bin/whisper-cli
+COPY --from=whisper-builder /build/whisper.cpp/build/src/libwhisper.so* /usr/local/lib/
+RUN chmod +x /usr/local/bin/whisper-cli && \
+    ldconfig
 
 # Create directory for whisper models
 RUN mkdir -p /app/models
@@ -88,6 +90,7 @@ ENV WHISPER_MODEL=small
 ENV WHISPER_LANGUAGE=pt
 ENV WHISPER_THREADS=2
 ENV FFMPEG_PATH=/usr/bin/ffmpeg
+ENV LD_LIBRARY_PATH=/usr/local/lib
 
 # Expose port
 EXPOSE 8080
