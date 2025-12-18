@@ -141,6 +141,19 @@ class StreamingTranscriptionController(
             "message" to "Room $roomSid cleared"
         ))
     }
+    
+    /**
+     * Get all active streaming sessions info
+     */
+    @GetMapping("/sessions")
+    fun getActiveSessions(): ResponseEntity<Map<String, Any>> {
+        val chunkBased = assemblyAIService.getStatus("__all__")
+        return ResponseEntity.ok(mapOf(
+            "mode" to "streaming",
+            "description" to "Use /ws/transcription WebSocket for real-time streaming",
+            "chunkBasedStatus" to chunkBased
+        ))
+    }
 }
 
 data class FinalizeRequest(
