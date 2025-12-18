@@ -36,11 +36,12 @@ O **Meeting API** é uma solução completa de videoconferência que oferece:
 
 - ✅ Captura de áudio de **todos os participantes** (local + remotos) via Web Audio API
 - ✅ Mixagem de áudio em tempo real com **AudioContext**
-- ✅ Processamento de áudio com **FFmpeg** (filtros de ruído, normalização)
+- ✅ **Streaming em tempo real** via WebSocket para AssemblyAI Real-time API
 - ✅ Transcrição via **AssemblyAI** com modelo otimizado para português
-- ✅ Chunks de áudio enviados a cada **30 segundos** para processamento
+- ✅ Chunks de áudio otimizados de **250ms** para baixa latência
+- ✅ **Word-level timestamps** e confidence scores
 - ✅ Resumo estruturado com **Gemini 2.5 Flash** ao final da reunião
-- ✅ WebSocket para transcrição em tempo real
+- ✅ **Reconexão automática** em caso de perda de conexão
 - ✅ Suporte a **HTTPS/WSS** para produção
 
 ---
@@ -59,64 +60,64 @@ O **Meeting API** é uma solução completa de videoconferência que oferece:
 │  │                  │  │                  │  │ Service                  │  │
 │  │  • joinRoom()    │  │  • WebSocket     │  │                          │  │
 │  │  • leaveRoom()   │  │  • STOMP         │  │  • AudioContext (mixer)  │  │
-│  │  • tracks mgmt   │  │  • messages[]    │  │  • ScriptProcessor       │  │
-│  └────────┬─────────┘  └────────┬─────────┘  │  • PCM 16-bit encoding   │  │
+│  │  • tracks mgmt   │  │  • messages[]    │  │  • 250ms audio chunks    │  │
+│  └────────┬─────────┘  └────────┬─────────┘  │  • PCM 16-bit @ 16kHz    │  │
 │           │                     │            │  • Base64 streaming      │  │
+│           │                     │            │  • Auto-reconnect        │  │
 │           │                     │            └────────────┬─────────────┘  │
 │           │                     │                         │                │
 └───────────┼─────────────────────┼─────────────────────────┼────────────────┘
-            │ HTTP                │ WS                      │ WS (audio)
+            │ HTTP                │ WS/STOMP                │ WS (real-time)
             ▼                     ▼                         ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                         BACKEND (Spring Boot 3.5 + Kotlin)                   │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────────┐  │
-│  │ TwilioController │  │  ChatController  │  │ StreamingTranscription   │  │
-│  │                  │  │                  │  │ Controller               │  │
+│  │ TwilioController │  │  ChatController  │  │ RealtimeTranscription    │  │
+│  │                  │  │                  │  │ Handler (WebSocket)      │  │
 │  │ GET /token/{id}  │  │  WS /ws/chat     │  │                          │  │
-│  │ GET /token/../   │  │                  │  │  POST /chunk             │  │
-│  │     room/{name}  │  │                  │  │  POST /finalize          │  │
-│  └────────┬─────────┘  └──────────────────┘  │  POST /finalize-summary  │  │
-│           │                                   └────────────┬─────────────┘  │
-│           ▼                                                │                │
+│  │ GET /token/../   │  │                  │  │  WS /ws/transcription    │  │
+│  │     room/{name}  │  │                  │  │  • Audio buffering       │  │
+│  └────────┬─────────┘  └──────────────────┘  │  • AssemblyAI bridge     │  │
+│           │                                   │  • Word timestamps       │  │
+│           ▼                                   └────────────┬─────────────┘  │
 │  ┌──────────────────┐                                      │                │
 │  │  TwilioService   │                                      ▼                │
 │  │                  │                       ┌──────────────────────────┐    │
-│  │ • createRoom()   │                       │ AssemblyAITranscription  │    │
-│  │ • generateToken()│                       │ Service                  │    │
+│  │ • createRoom()   │                       │ StreamingTranscription   │    │
+│  │ • generateToken()│                       │ Session                  │    │
 │  │ • webhook setup  │                       │                          │    │
-│  └──────────────────┘                       │ • queueChunk()           │    │
-│                                             │ • processChunk()         │    │
-│                                             │ • finalizeTranscription()│    │
+│  └──────────────────┘                       │ • AssemblyAI Real-time   │    │
+│                                             │ • 250ms buffer chunks    │    │
+│                                             │ • Partial + Final texts  │    │
 │                                             └────────────┬─────────────┘    │
 │                                                          │                  │
 │                          ┌───────────────────────────────┼──────────────┐   │
-│                          ▼                               ▼              │   │
-│            ┌──────────────────────┐       ┌──────────────────────┐     │   │
-│            │ AudioConverterService│       │   AssemblyAI API     │     │   │
-│            │                      │       │                      │     │   │
-│            │ FFmpeg:              │       │ • Upload audio       │     │   │
-│            │ • WebM → WAV 16kHz   │       │ • Create transcript  │     │   │
-│            │ • highpass 80Hz      │       │ • Poll for result    │     │   │
-│            │ • lowpass 8000Hz     │       │ • Portuguese (pt)    │     │   │
-│            │ • afftdn noise red   │       └──────────────────────┘     │   │
-│            │ • compand dynamics   │                                     │   │
-│            │ • loudnorm           │                                     │   │
-│            └──────────────────────┘                                     │   │
-│                                                                         │   │
-│                                            ┌──────────────────────┐     │   │
-│                                            │ GeminiSummaryService │◄────┘   │
-│                                            │                      │         │
-│                                            │ • generateSummary()  │         │
-│                                            │ • JSON structured    │         │
-│                                            │ • Gemini 2.5 Flash   │         │
-│                                            └──────────────────────┘         │
+│                          │                               ▼              │   │
+│                          │                ┌──────────────────────┐     │   │
+│                          │                │   AssemblyAI         │     │   │
+│                          │                │   Real-time API      │     │   │
+│                          │                │                      │     │   │
+│                          │                │ WSS streaming:       │     │   │
+│                          │                │ • PartialTranscript  │     │   │
+│                          │                │ • FinalTranscript    │     │   │
+│                          │                │ • Word timestamps    │     │   │
+│                          │                │ • Confidence scores  │     │   │
+│                          │                └──────────────────────┘     │   │
+│                          │                                              │   │
+│                          │                ┌──────────────────────┐     │   │
+│                          └───────────────►│ GeminiSummaryService │◄────┘   │
+│                                           │                      │         │
+│                                           │ • generateSummary()  │         │
+│                                           │ • JSON structured    │         │
+│                                           │ • Gemini 2.5 Flash   │         │
+│                                           └──────────────────────┘         │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Fluxo de Dados
+### Fluxo de Dados (Streaming)
 
 ```
 ┌─────────────┐      ┌─────────────┐      ┌─────────────┐      ┌─────────────┐
@@ -124,12 +125,12 @@ O **Meeting API** é uma solução completa de videoconferência que oferece:
 │             │      │   Angular   │      │ Spring Boot │      │   Cloud     │
 └─────────────┘      └──────┬──────┘      └──────┬──────┘      └─────────────┘
                             │                    │
-                            │   Audio Chunks     │
-                            │   (WebM/Base64)    │
+                            │  WebSocket         │  WebSocket
+                            │  (PCM 16-bit)      │  (Real-time)
                             ▼                    ▼
                      ┌─────────────┐      ┌─────────────┐
-                     │   FFmpeg    │ ───► │ AssemblyAI  │
-                     │   (WAV)     │      │   (STT)     │
+                     │   Backend   │ ───► │ AssemblyAI  │
+                     │   Bridge    │      │ Real-time   │
                      └─────────────┘      └──────┬──────┘
                                                  │
                                                  │ Transcription
@@ -248,9 +249,69 @@ class TwilioService {
 - Configuração de gravação automática
 - Setup de webhooks para eventos
 
-#### 2. AssemblyAITranscriptionService
+#### 2. RealtimeTranscriptionHandler (WebSocket)
 
-Gerencia transcrição de áudio via AssemblyAI.
+Handler WebSocket para transcrição em streaming com AssemblyAI Real-time API.
+
+```kotlin
+@Component
+class RealtimeTranscriptionHandler : TextWebSocketHandler() {
+    // Sessões ativas por cliente
+    private val clientSessions = ConcurrentHashMap<String, StreamingTranscriptionSession>()
+    
+    // Processa mensagens do cliente
+    override fun handleTextMessage(session, message) {
+        when (msg.type) {
+            "start" -> handleStart(session, msg)  // Inicia sessão AssemblyAI
+            "audio" -> handleAudioData(session, msg.audio)  // Encaminha áudio
+            "stop" -> handleStop(session)  // Finaliza + gera resumo
+            "ping" -> sendMessage(session, mapOf("type" to "pong"))
+        }
+    }
+}
+```
+
+**StreamingTranscriptionSession:**
+```kotlin
+class StreamingTranscriptionSession {
+    // Buffer de áudio para chunks otimizados (250ms)
+    private val audioBuffer = ByteArrayOutputStream()
+    private val OPTIMAL_CHUNK_SIZE = 8000  // 250ms @ 16kHz 16-bit
+    
+    // Conecta ao AssemblyAI Real-time
+    fun connect() {
+        val wsUri = "wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000"
+        assemblyWs = httpClient.newWebSocketBuilder().buildAsync(wsUri, listener)
+    }
+    
+    // Envia áudio com buffering
+    fun sendAudio(audioData: ByteArray) {
+        audioBuffer.write(audioData)
+        while (audioBuffer.size() >= OPTIMAL_CHUNK_SIZE) {
+            val chunk = audioBuffer.toByteArray().take(OPTIMAL_CHUNK_SIZE)
+            assemblyWs.sendText("""{"audio_data": "${base64(chunk)}"}""")
+        }
+    }
+    
+    // Estatísticas da sessão
+    fun getStats(): Map<String, Any> = mapOf(
+        "totalChunks" to totalChunks,
+        "totalBytes" to totalBytes,
+        "finalTranscripts" to finalTranscriptCount,
+        "durationMs" to duration
+    )
+}
+```
+
+**Características:**
+- Buffer de 250ms para latência otimizada
+- Word-level timestamps e confidence scores
+- Reconexão automática em caso de falha
+- Métricas de sessão (chunks, bytes, duração)
+
+#### 3. AssemblyAITranscriptionService (Modo Chunk - Legacy)
+
+Alternativa para transcrição via upload de chunks (30s).
 
 ```kotlin
 @Service
@@ -268,52 +329,6 @@ class AssemblyAITranscriptionService {
     fun finalizeTranscription(roomSid): String
 }
 ```
-
-**Fluxo de Processamento:**
-1. Recebe chunk WebM do frontend
-2. Converte para WAV 16kHz via FFmpeg
-3. Faz upload para AssemblyAI
-4. Cria job de transcrição
-5. Polling até conclusão
-6. Armazena resultado no estado da sala
-
-**Gerenciamento de Estado:**
-```kotlin
-data class AssemblyAIRoomState(
-    val roomSid: String,
-    val chunks: ConcurrentHashMap<Int, String>,  // index → texto
-    val lastChunkIndex: AtomicInteger,
-    var isFinalized: Boolean,
-    var fullTranscription: String?,
-    var summary: Map<String, Any?>?
-)
-```
-
-#### 3. AudioConverterService
-
-Processa áudio com FFmpeg para otimização.
-
-```kotlin
-@Service
-class AudioConverterService {
-    fun convertToPcm16(inputPath: Path): Path? {
-        // Pipeline de filtros FFmpeg:
-        val audioFilters = listOf(
-            "highpass=f=80",          // Remove ruído grave
-            "lowpass=f=8000",         // Remove ruído agudo
-            "afftdn=nf=-20",          // Redução de ruído
-            "compand=...",            // Compressão dinâmica
-            "loudnorm=I=-16:TP=-1.5"  // Normalização
-        )
-    }
-}
-```
-
-**Parâmetros de Saída:**
-- Sample rate: 16kHz (otimizado para STT)
-- Canais: Mono
-- Formato: PCM 16-bit signed
-- Container: WAV
 
 #### 4. GeminiSummaryService
 
@@ -406,7 +421,7 @@ export class TwilioService {
 
 #### 2. WebSocketTranscriptionService
 
-Captura e transmite áudio em tempo real.
+Captura e transmite áudio em tempo real com streaming otimizado.
 
 ```typescript
 @Injectable({ providedIn: 'root' })
@@ -414,52 +429,65 @@ export class WebSocketTranscriptionService {
     private websocket: WebSocket | null = null;
     private audioContext: AudioContext | null = null;
     private mediaStreamDestination: MediaStreamAudioDestinationNode | null = null;
-    private scriptProcessor: ScriptProcessorNode | null = null;
+    
+    // Audio buffering para chunks otimizados (250ms)
+    private audioBuffer: Int16Array[] = [];
+    private readonly TARGET_CHUNK_SAMPLES = 4000; // 250ms @ 16kHz
     
     // Observables
     transcript$ = new BehaviorSubject<string>('');
     partialTranscript$ = new BehaviorSubject<string>('');
     status$ = new BehaviorSubject<string>('idle');
+    confidence$ = new BehaviorSubject<number>(0);  // Confiança da transcrição
     
-    // Inicia gravação
-    async startRecording(roomSid: string): Promise<void> {
+    // Reconexão automática
+    private reconnectAttempts = 0;
+    private readonly MAX_RECONNECT_ATTEMPTS = 3;
+    
+    // Inicia gravação com roomName para melhor contexto no resumo
+    async startRecording(roomSid: string, roomName?: string): Promise<void> {
         await this.connectWebSocket();
         await this.setupAudioCapture();
-        this.sendMessage({ type: 'start', roomSid });
+        this.sendMessage({ type: 'start', roomSid, roomName });
+        this.startPingInterval();  // Keep-alive
     }
     
-    // Configura captura de áudio
-    private async setupAudioCapture(): Promise<void> {
-        this.audioContext = new AudioContext({ sampleRate: 16000 });
-        this.mediaStreamDestination = this.audioContext.createMediaStreamDestination();
-        
-        // Script processor para capturar amostras
-        this.scriptProcessor = this.audioContext.createScriptProcessor(4096, 1, 1);
-        this.scriptProcessor.onaudioprocess = (event) => {
-            const pcmData = this.float32ToInt16(event.inputBuffer.getChannelData(0));
-            const base64Audio = this.arrayBufferToBase64(pcmData.buffer);
-            this.sendMessage({ type: 'audio', audio: base64Audio });
-        };
+    // Buffer e envio otimizado
+    private flushAudioBuffer(): void {
+        const combined = combineBuffers(this.audioBuffer);
+        const base64 = this.arrayBufferToBase64(combined.buffer);
+        this.sendMessage({ type: 'audio', audio: base64 });
+        this.audioBuffer = [];
     }
     
-    // Adiciona áudio de participante remoto
+    // Adiciona áudio de participante remoto ao mix
     addRemoteAudioTrack(participantId: string, audioTrack: MediaStreamTrack): void {
         const stream = new MediaStream([audioTrack]);
         const source = this.audioContext.createMediaStreamSource(stream);
         source.connect(this.mediaStreamDestination);
+    }
+    
+    // Para e obtém resultado com resumo
+    async stopRecording(): Promise<TranscriptMessage | null> {
+        this.flushAudioBuffer();  // Envia áudio restante
+        this.sendMessage({ type: 'stop' });
+        return await this.waitForCompletion();
     }
 }
 ```
 
 **Características:**
 - Sample rate: 16kHz (requerido por AssemblyAI)
-- Buffer size: 4096 samples
+- Buffer de 250ms (4000 samples) para latência otimizada
 - Formato: PCM 16-bit signed → Base64
 - Mixagem de múltiplos participantes
+- Reconexão automática (até 3 tentativas)
+- Ping/pong keep-alive a cada 30s
+- Confidence scores por transcrição
 
-#### 3. AudioStreamingService (Modo Chunk)
+#### 3. AudioStreamingService (Modo Chunk - Legacy)
 
-Alternativa que envia chunks de 30 segundos.
+Alternativa que envia chunks de 30 segundos via HTTP.
 
 ```typescript
 @Injectable({ providedIn: 'root' })
@@ -623,7 +651,7 @@ export class TranscriptionComponent implements OnInit {
      │                     │                     │                     │
 ```
 
-### 2. Captura e Transcrição de Áudio
+### 2. Captura e Transcrição de Áudio (Streaming Real-time)
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────┐
@@ -637,13 +665,19 @@ export class TranscriptionComponent implements OnInit {
 │   ┌─────────────────┐      ├─────►│              │                        │
 │   │ Participante 1  │──────┤      │ AudioContext │──► MediaStream         │
 │   │ (RemoteTrack)   │      │      │    Mixer     │    Destination         │
-│   └─────────────────┘      │      │              │         │              │
+│   └─────────────────┘      │      │  (16kHz)     │         │              │
 │                            ├─────►└──────────────┘         │              │
 │   ┌─────────────────┐      │                               ▼              │
 │   │ Participante N  │──────┘                    ┌──────────────────┐      │
 │   │ (RemoteTrack)   │                           │ ScriptProcessor  │      │
 │   └─────────────────┘                           │ (4096 samples)   │      │
 │                                                 └────────┬─────────┘      │
+│                                                          │                │
+│                                         ┌────────────────┴────────────┐   │
+│                                         │     AUDIO BUFFER (250ms)    │   │
+│                                         │  Acumula até 4000 samples   │   │
+│                                         │  (8000 bytes PCM 16-bit)    │   │
+│                                         └────────────────┬────────────┘   │
 │                                                          │                │
 │                                              Float32 → Int16 PCM          │
 │                                                          │                │
@@ -652,53 +686,50 @@ export class TranscriptionComponent implements OnInit {
 │                                                          ▼                │
 │                                                 ┌─────────────────┐       │
 │                                                 │ WebSocket send  │       │
-│                                                 │ { type: 'audio' │       │
+│                                                 │ { type: 'audio',│       │
 │                                                 │   audio: base64 }│       │
 │                                                 └─────────────────┘       │
 │                                                                           │
 └───────────────────────────────────────────────────────────────────────────┘
                                       │
-                                      │ A cada 30 segundos (modo chunk)
-                                      │ ou streaming contínuo
+                                      │ Streaming contínuo (250ms chunks)
+                                      │ via WebSocket /ws/transcription
                                       ▼
 ┌───────────────────────────────────────────────────────────────────────────┐
-│                      PROCESSAMENTO NO BACKEND                              │
+│                BACKEND - REALTIME TRANSCRIPTION HANDLER                    │
 ├───────────────────────────────────────────────────────────────────────────┤
 │                                                                           │
-│   1. Recebe chunk (POST /api/v1/transcription/chunk)                      │
-│      └── audioFile: MultipartFile (WebM/Opus)                             │
-│      └── roomSid: String                                                  │
-│      └── chunkIndex: Int                                                  │
+│   1. WebSocket /ws/transcription recebe mensagem                          │
+│      └── type: "audio"                                                    │
+│      └── audio: Base64 encoded PCM 16-bit 16kHz mono                      │
 │                                                                           │
-│   2. Enfileira para processamento assíncrono                              │
-│      └── ExecutorService com pool de threads                              │
-│                                                                           │
-│   3. FFmpeg conversion pipeline:                                          │
+│   2. StreamingTranscriptionSession                                        │
 │      ┌──────────────────────────────────────────────────────────┐        │
-│      │  ffmpeg -i input.webm                                    │        │
-│      │    -af "highpass=f=80,                                   │        │
-│      │         lowpass=f=8000,                                  │        │
-│      │         afftdn=nf=-20,                                   │        │
-│      │         compand=attacks=0.3:decays=0.8:...,              │        │
-│      │         loudnorm=I=-16:TP=-1.5:LRA=11"                   │        │
-│      │    -ar 16000 -ac 1 -sample_fmt s16 -f wav output.wav     │        │
+│      │  Audio Buffer (250ms = 8000 bytes)                       │        │
+│      │  • Acumula chunks até tamanho ideal                      │        │
+│      │  • Envia para AssemblyAI quando buffer cheio             │        │
 │      └──────────────────────────────────────────────────────────┘        │
+│                         │                                                 │
+│                         ▼                                                 │
+│   3. Bridge WebSocket → AssemblyAI Real-time API                          │
+│      ┌──────────────────────────────────────────────────────────┐        │
+│      │  wss://api.assemblyai.com/v2/realtime/ws                 │        │
+│      │  • sample_rate=16000                                      │        │
+│      │  • encoding=pcm_s16le                                     │        │
+│      │  • Envia: {"audio_data": "<base64>"}                      │        │
+│      └──────────────────────────────────────────────────────────┘        │
+│                         │                                                 │
+│                         ▼                                                 │
+│   4. Recebe respostas do AssemblyAI                                       │
+│      ├── PartialTranscript → Envia para cliente (isFinal: false)          │
+│      ├── FinalTranscript   → Armazena + Envia (isFinal: true)             │
+│      │   └── Inclui: text, confidence, words[] com timestamps             │
+│      └── SessionTerminated → Finaliza sessão                              │
 │                                                                           │
-│   4. Upload para AssemblyAI                                               │
-│      └── POST https://api.assemblyai.com/v2/upload                        │
-│      └── Retorna upload_url                                               │
-│                                                                           │
-│   5. Cria job de transcrição                                              │
-│      └── POST https://api.assemblyai.com/v2/transcript                    │
-│      └── language_code: "pt"                                              │
-│      └── speech_model: "best"                                             │
-│                                                                           │
-│   6. Polling até conclusão (500ms interval)                               │
-│      └── GET https://api.assemblyai.com/v2/transcript/{id}                │
-│      └── Aguarda status: "completed"                                      │
-│                                                                           │
-│   7. Armazena resultado no estado da sala                                 │
-│      └── roomStates[roomSid].chunks[chunkIndex] = text                    │
+│   5. Ao encerrar (type: "stop")                                           │
+│      └── Combina todos os FinalTranscripts                                │
+│      └── Chama GeminiSummaryService para resumo                           │
+│      └── Retorna: fullTranscription + summary + stats                     │
 │                                                                           │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
@@ -713,25 +744,30 @@ export class TranscriptionComponent implements OnInit {
      │ Clica "Sair"        │                     │                     │
      │────────────────────►│                     │                     │
      │                     │                     │                     │
-     │                     │ POST /finalize-     │                     │
-     │                     │   with-summary      │                     │
+     │                     │ WS: {type: "stop"}  │                     │
      │                     │────────────────────►│                     │
      │                     │                     │                     │
-     │                     │                     │ Aguarda chunks      │
-     │                     │                     │ pendentes           │
+     │                     │                     │ endStream()         │
+     │                     │                     │ Flush audio buffer  │
      │                     │                     │                     │
-     │                     │                     │ Combina chunks      │
-     │                     │                     │ ordenados           │
+     │                     │                     │ terminate_session   │
+     │                     │                     │───► AssemblyAI      │
      │                     │                     │                     │
-     │                     │                     │ Remove overlaps     │
+     │                     │                     │ Aguarda últimos     │
+     │                     │                     │ FinalTranscripts    │
+     │                     │                     │                     │
+     │                     │                     │ Combina todos os    │
+     │                     │                     │ transcripts         │
      │                     │                     │                     │
      │                     │                     │ Chama Gemini API    │
      │                     │                     │────────────────────►│
      │                     │                     │                     │
      │                     │                     │◄─── JSON Summary ───│
      │                     │                     │                     │
-     │                     │◄── Transcription ───│                     │
-     │                     │    + Summary        │                     │
+     │                     │◄── WS: {type:       │                     │
+     │                     │    "completed",     │                     │
+     │                     │    fullTranscription│                     │
+     │                     │    summary, stats}  │                     │
      │                     │                     │                     │
      │◄─── Exibe Resultado─│                     │                     │
      │                     │                     │                     │
@@ -928,12 +964,68 @@ hasOverlap: false
 |--------|----------|-----------|
 | `POST` | `/webhooks/twilio/room-ended` | Callback quando sala encerra |
 
-### WebSocket
+### WebSocket Endpoints
+
+#### /ws/transcription (Real-time Streaming)
+
+Protocolo WebSocket nativo para transcrição em tempo real via AssemblyAI.
+
+**Mensagens do Cliente → Servidor:**
+
+| type | Descrição | Payload |
+|------|-----------|---------|
+| `start` | Inicia sessão de transcrição | `{ roomSid, roomName? }` |
+| `audio` | Envia chunk de áudio | `{ audio: "<base64 PCM16>" }` |
+| `stop` | Finaliza e gera resumo | `{}` |
+| `ping` | Keep-alive | `{}` |
+
+**Mensagens do Servidor → Cliente:**
+
+| type | Descrição | Payload |
+|------|-----------|---------|
+| `connected` | Conexão estabelecida | `{ sessionId, message }` |
+| `started` | Sessão iniciada | `{ roomSid, sampleRate, encoding }` |
+| `session_info` | Info da sessão AssemblyAI | `{ assemblySessionId, expiresAt }` |
+| `transcript` | Transcrição parcial/final | `{ text, isFinal, confidence?, words? }` |
+| `completed` | Finalizado com resumo | `{ fullTranscription, summary, stats }` |
+| `error` | Erro | `{ error }` |
+| `pong` | Resposta keep-alive | `{}` |
+
+**Formato de Áudio Esperado:**
+- Sample rate: 16000 Hz
+- Bit depth: 16-bit signed PCM
+- Channels: Mono
+- Encoding: Base64
+
+**Exemplo de uso:**
+```javascript
+const ws = new WebSocket('wss://api.example.com/ws/transcription');
+
+ws.onopen = () => {
+  ws.send(JSON.stringify({ type: 'start', roomSid: 'RM123', roomName: 'Reunião' }));
+};
+
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  if (msg.type === 'transcript' && msg.isFinal) {
+    console.log('Final:', msg.text);
+  }
+};
+
+// Enviar áudio (250ms chunks recomendado)
+const pcmData = captureAudio(); // Int16Array
+const base64 = btoa(String.fromCharCode(...new Uint8Array(pcmData.buffer)));
+ws.send(JSON.stringify({ type: 'audio', audio: base64 }));
+
+// Finalizar
+ws.send(JSON.stringify({ type: 'stop' }));
+```
+
+#### /ws/chat (STOMP/SockJS)
 
 | Endpoint | Protocolo | Descrição |
 |----------|-----------|-----------|
-| `/ws/transcription` | WebSocket | Transcrição em tempo real |
-| `/ws/chat` | STOMP/SockJS | Chat em tempo real |
+| `/ws` | STOMP/SockJS | Chat em tempo real |
 
 ---
 
